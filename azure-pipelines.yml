@@ -1,0 +1,77 @@
+trigger:
+- master
+
+pool:
+  vmImage: windows-latest
+
+variables:
+  BuildPlatform: 'any cpu'  # Set your desired build platform
+  BuildConfiguration: 'release'  # Set your desired build configuration
+  latestVersionBranch: '$(LatestVersionBranch)'
+jobs:
+- job: CreateVersionBranch
+  condition: eq(variables['Build.Reason'], 'Manual')
+  steps:
+  - checkout: self
+
+  # Define the script to create a new version branch
+  - powershell: |
+      # Replace 'YOUR-PAT-HERE' with an actual PAT with the necessary repository scopes
+      $pat = 'wjcxiyffzvquratnq2jnimxu4gsmcffdy53wpz2lzkf2phqrksja'
+      $repositoryUrl = 'https://kumarsai16061971:' + $pat + '@dev.azure.com/kumarsai16061971/dot_net/_git/dotnet_5.0'
+      $branchPath = 'users/devops'
+
+      # Set the repository URL
+      git remote set-url origin $repositoryUrl
+
+      Write-Host "Fetching branches..."
+      git fetch -p
+
+      # Increment the version component
+      $latestVersionBranch = git branch -r | Where-Object { $_ -match "origin/$branchPath/version-(\d+)" } | ForEach-Object { [int]($_ -replace "origin/$branchPath/version-(\d+)", '$1') }
+      $currentVersion = if ($latestVersionBranch) { $latestVersionBranch | Sort-Object -Descending | Select-Object -First 1 } else { 0 }
+      $newVersion = $currentVersion + 1
+
+      # Generate the new branch name with the incremented version
+      $newBranch = "$branchPath/version-$newVersion"
+
+      Write-Host "Creating a new branch: $newBranch"
+      git checkout -b $newBranch
+
+      Write-Host "Pushing the new branch to the remote repository..."
+      git push --set-upstream origin $newBranch
+
+      # Output the new branch name for downstream jobs
+      Write-Host "##vso[task.setvariable variable=LatestVersionBranch]$newBranch"
+
+    displayName: 'Create and Push Version Branch'
+
+- job: BuildLatestBranch
+  dependsOn: CreateVersionBranch
+  condition: succeeded()
+  variables:
+    LatestVersionBranch: $[ dependencies.CreateVersionBranch.outputs['CreateVersionBranch.LatestVersionBranch'] ]
+  steps:
+  - checkout: self
+    clean: true
+
+  # Use the LatestVersionBranch variable to get the latest version branch
+  - powershell: |
+     $latestVersionBranch = "$(LatestVersionBranch)"
+     Write-Host "Building the latest version branch: $latestVersionBranch"
+
+     # Manually checkout the latest version branch
+     git checkout $latestVersionBranch
+
+  - task: NuGetCommand@2
+    inputs:
+      command: 'restore'
+      restoreSolution: '**/*.sln'
+      feedsToUse: 'select'
+
+  - task: VSBuild@1
+    inputs:
+      solution: '**\*.sln'
+      msbuildArgs: '/p:DeployOnBuild=true /p:WebPublishMethod=Package /p:PackageAsSingleFile=true /p:SkipInvalidConfigurations=true /p:PackageLocation="$(build.artifactstagingdirectory)\\"'
+      platform: '$(BuildPlatform)'
+      configuration: '$(BuildConfiguration)'
